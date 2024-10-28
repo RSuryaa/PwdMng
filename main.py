@@ -1,62 +1,83 @@
-import mysql.connector as sqltor
+from  mysql.connector import connect 
+from getpass import getpass
 from cryptography.fernet import Fernet
-import time
-import hashlib
+import time, hashlib
 
-def createUser(connection_dict,UserName,Passwd,host,newUserExist,masterKey):
+def createUser(cur,username,passwd,host,newUserExist,masterKey):
     if not newUserExist:
-        command="CREATE USER '{}'@'{}' IDENTIFIED BY '{}'".format(UserName,host,Passwd)
-        connection_dict['cursor'].execute(command)
+        create_user = f"CREATE USER '{username}'@'{host}' IDENTIFIED BY '{passwd}'"
+        cur.execute(create_user)
     else:
         try:
-            testConnection=login(host,UserName,Passwd)
+            testConnection = login(host,username,passwd)
             testConnection.close()
         except:
-            print('Given User already has a MySQL Account. MySQL Credentials do not match. Try again with correct details!.')
+            print(f'Invalid MySQL credentials for {username}.')
             return None
+
     try:    
-        connection_dict['cursor'].execute("INSERT INTO pwdhash VALUES('{}','{}')".format(UserName,masterKey))
+        cur.execute("INSERT INTO pwdhash VALUES(%s,%s)", [username, masterKey])
     except:
-        print('Error registering User! Check if user already registered with Database')
+        print('Error registering user! Check if user already registered in database')
     else:
-        connection_dict['cursor'].execute("CREATE TABLE {} (PID int primary key,Website varchar(40),Pwd_Encrypted varchar(100),Last_Updated timestamp)".format(UserName))
-        print('User created successfully!\n' + '='*30)
+        cur.execute(f"CREATE TABLE {username} (pid INT PRIMARY KEY, website VARCHAR(40), pwd_encrypted VARCHAR(100), last_updated timestamp)")
+        print('User created successfully!', '='*30, sep='\n')
+
+def getMasterKey(prompt='Enter master password (remember to write it down): '):
+    # Makes user type master password twice for confirmation
+    while True:
+        atmpt1 = getpass(prompt)
+
+        # To cancel setup
+        if atmpt1 == '':
+            return None
+
+        atmpt2 = getpass("Enter Master Password again: ")
+
+        if atmpt1 == atmpt2:
+            masterKey = hashlib.sha256(atmpt1.encode()).hexdigest()
+            del atmpt1, atmpt2
+            break
+        else:
+            print("Master password does not match\n")
+    
+    print()
+    return masterKey
 
 def setup():
-    host=input('Enter host id:')
-    passwd=input('Enter password of MySQL root account:')
-    username='root' # Only root user can install software for security reasons.
-    connection_dict={}
-    connection_dict['connection']=login(host,username,passwd)
-    connection_dict['cursor']=connection_dict['connection'].cursor()
-    connection_dict['cursor'].execute('create database PwdMng')
-    connection_dict['cursor'].execute('Use PwdMng')
-    connection_dict['cursor'].execute('CREATE TABLE pwdhash(Username varchar(20), pwdhashed varchar(64), Type varchar(6))')
-    masterKey=input('Enter MasterKey (Remember to write it down):')
-    masterKeyHashed=hashlib.sha256(masterKey.encode()).hexdigest()
-    connection_dict['cursor'].execute("INSERT INTO pwdhash VALUES('root','{}','ADMIN')".format(masterKeyHashed))
-    connection_dict['cursor'].execute('CREATE TABLE root(PID int primary key,Website varchar(40),Pwd_Encrypted varchar(100),Last_Updated timestamp)')
-    connection_dict['connection'].commit()
-    connection_dict['connection'].close()
+    host = input('Enter host id: ')
+    username = 'root' # Only root user can install software for security reasons.
+    passwd = getpass('Enter password of MySQL root account: ')
 
+    con = login(host,username,passwd)
+    cur = con.cursor()
 
-def login(host_id,username,password,DB_Name=None):
-    if DB_Name == None:
-        return sqltor.connect(host=host_id,user=username,passwd=password)
+    cur.execute('CREATE DATABASE IF NOT EXISTS PwdMng')
+    cur.execute('USE PwdMng')
+    cur.execute('CREATE TABLE IF NOT EXISTS pwdhash(username varchar(20), pwdhashed varchar(64), type varchar(6))')
+
+    masterKey = getMasterKey()
+
+    cur.execute("INSERT INTO pwdhash VALUES('root', %s,'ADMIN')", [masterKey])
+    cur.execute('CREATE TABLE IF NOT EXISTS root(pid INT PRIMARY KEY, website VARCHAR(40), pwd_encrypted VARCHAR(100), last_updated timestamp)')
+    con.commit()
+    con.close()
+
+def login(host_id, username, password, db=None):
+    if not db:
+        return connect(host=host_id,user=username,passwd=password)
     else:
-        return sqltor.connect(host=host_id,user=username,passwd=password,database=DB_Name)
+        return connect(host=host_id,user=username,passwd=password,database=db)
 
-def normalLogin(connection_dict):
+def normalMenu(cur, username, masterKey):
     raise NotImplementedError
 
-def adminLogin(connection_dict):  #Displays available functions for adminLogin (Not used for logging in!)
+def adminMenu(cur, masterKey):  
+    # Options for admin
     while True:
-        print('(Logged in as Admin)')
-        print('\n\n')
+        print('Logged in as Admin')
         print('='*30)
-        print()
-        print('Options:')
-        print()
+        print('Options:\n')
         print('1. Create User')
         print('2. Delete New User')
         print('3. Grant/Revoke Privileges to Users')
@@ -64,45 +85,52 @@ def adminLogin(connection_dict):  #Displays available functions for adminLogin (
         print('5. Search your Password')
         print('6. Delete your Password')
         print('7. Logout')
-        print()
-        ch=input('Enter your choice:')
+        print('='*30)
+        ch = input('Enter your choice: ')
 
-        if ch=='1':
-            newName=input("Enter New User Name(Must match with MySQL Username):")
-            connection_dict['cursor'].execute('SELECT user from mysql.user')
-            user_tuple=connection_dict['cursor'].fetchall()
-            newUserExists=False
+        if ch == '1':
+            uname = input("Enter new username (must match with MySQL username): ")
+            cur.execute('SELECT user from mysql.user')
+            user_tuple = cur.fetchall()
+
+            userExists = False
             for i in user_tuple:    # To check if user already exists in MySQL
-                if newName in i:
-                    newUserExists=True
+                if uname in i:
+                    userExists = True
                     break
-            newpwd=input('Enter New User MySQL password:')
-            newhost=input("Enter New User's host:")
-            newMasterKey=input('Enter New User MasterKey:')
-            createUser(connection_dict,newName,newpwd,newhost,newUserExists,newMasterKey)
-            del newName, newUserExists, newpwd, newhost, newMasterKey, user_tuple
-        if ch=='2':
-            delusername = input('Username to be deleted:')
-            del_table='DROP TABLE {}'.format(delusername)
-            connection_dict['cursor'].execute(del_table)
-            connection_dict['cursor'].execute("DELETE FROM pwdhash WHERE User_Name = '{}'".format(delusername))
-            del delusername, del_table
-            print('User deleted successfully!')
-        if ch=='3':
-            print('List of Users registered with Database:')
-            connection_dict['cursor'].execute('SELECT user_name FROM pwdhash')
-            for i in connection_dict['cursor'].fetchall():
+
+            pwd = input("User's MySQL password: ")
+            host = input("User's host: ")
+            newMasterKey = getMasterKey("User's Master Key: ")
+
+            createUser(cur, uname, pwd, host, userExists, newMasterKey)
+
+        elif ch == '2':
+            target = input('Username to be deleted: ')
+            del_table = f'DROP TABLE IF EXISTS {target}'
+            cur.execute(del_table)
+            cur.execute("DELETE FROM pwdhash WHERE user_name = %s", [target])
+            print('User deleted successfully')
+
+        elif ch == '3':
+            print('List of users registered in database:')
+            cur.execute('SELECT user_name FROM pwdhash')
+            for i in cur.fetchall():
                 print(i[0])
             while True:
-                command = input("Enter SQL Command to grant/revoke privilege:")
-                connection_dict['cursor'].execute(command)
-                quit = input('Do you want to execute another command?(Y/N):')
-                if quit in 'nN':
+                command = input("Enter SQL Command to grant/revoke privilege: ")
+                cur.execute(command)
+                quit = input('Do you want to execute another command? (Y/N): ')
+                if quit not in 'yY':
                     break
-        if ch=='4':
-            website = input('Enter website:')
-            webpwd = input('Enter Password to store')
-            insertpwd(connection_dict,website,webpwd)
+
+        elif ch == '4':
+            website = input('Website: ')
+            webpwd = input('Password to store: ')
+            insertpwd(cur, website, webpwd)
+        
+        else:
+            return
 
 def hashpwdmixer(hash, pwd):
     key=''
@@ -118,14 +146,15 @@ def hashpwdmixer(hash, pwd):
         length = len(key)
     return key
 
-def insertpwd(userLogin, Website, Pwd_Encrypted):  #Needs SELECT and INSERT privilege
-    raise NotImplementedError # Tesing required
-    userLogin['cursor'].execute('SELECT COUNT(*) FROM User1')
-    PID=userLogin['cursor'].fetchone()[0]+1
-    timeStamp=convertTime(time.localtime())
-    command="INSERT INTO User1 VALUES('{}','{}','{}','{}')".format(PID,Website,Pwd_Encrypted,timeStamp)
-    userLogin['cursor'].execute(command)
-    userLogin['connection'].commit()
+def insertpwd(cur, website, pwd):  
+    # Requires SELECT and INSERT privilege
+    # raise NotImplementedError # Tesing required
+    cur.execute('SELECT COUNT(*) FROM User1')
+    PID = cur.fetchone()[0]+1
+    timeStamp = convertTime(time.localtime())
+    add_pwd ="INSERT INTO User1 VALUES(%s, %s, %s, %s)"
+    cur.execute(add_pwd, [PID, website, pwd, timeStamp])
+    cur.execute('COMMIT')
 
 def encrypt(pwd,key):
     fernet=Fernet(key)
@@ -135,7 +164,8 @@ def decrypt(encrpwd,key):
     fernet = Fernet(key)
     return fernet.decrypt(encrpwd).decode()
 
-def convertTime(timetuple):  #Converts time that is in valid format for entry into MYSQL database
+def convertTime(timetuple):  
+    # Converts time to valid format for entry into MYSQL database
     return '{},{},{},{},{},{}'.format(timetuple.tm_year,timetuple.tm_mon,timetuple.tm_mday,timetuple.tm_hour,timetuple.tm_min,timetuple.tm_sec)
 
 #insertpwd(b,input(),input())
@@ -143,75 +173,66 @@ def convertTime(timetuple):  #Converts time that is in valid format for entry in
 def main():
     while True:
         print('Welcome to Password Manager...')
-        print('\n'*3)
         print('='*30)
         print('Options:')
-        print('1. Setup(Only for fresh installation)')
-        print('2. Admin Login (Can Create and Delete Users)')  #Admin only can delete and create new users
+        print('1. Setup (for fresh installation)')
+        print('2. Admin Login (Can create and delete Users)')  # Only admin can delete and create new users
         print('3. Login')
         print('4. Exit')
-        print()
+        print('='*30)
 
-        ch=input('What do you want to do?\n...')
+        ch=input('What do you want to do?\n... ')
 
-        if ch=='4':
+        if ch == '4':
             print('Exiting the program...')
             break
 
-        if ch=='3':  # Logins the User as a Normal User and hands over control to normalLogin() for further options.
-            hostid=input('Enter hostid:')
-            userName=input('Enter Username:')
-            Passwd=input('Enter MySQL Password:')
-            masterKey=input('Enter Master Password:')
-            masterKeyHashed = hashlib.sha256(masterKey.encode()).hexdigest()
-            Userlogin={}
-            Userlogin['connection'] = login(host_id=hostid,username=userName,password=Passwd,DB_Name='PwdMng')
-            Userlogin['cursor'] = Userlogin['connection'].cursor()
-            Userlogin['cursor'].execute("SELECT * FROM pwdhash")
+        elif ch == '3':  
+            # Logs in as a normal user and hands over control to normalMenu()
+            hostid = input('Enter host id: ')
+            username = input('Enter username: ')
+            passwd = getpass('Enter MySQL Password: ')
+            masterKey = getpass('Enter Master Password: ')
+            masterKey = hashlib.sha256(masterKey.encode()).hexdigest()
+
+            con = login(hostid, username, passwd, 'pwdmng')
+            cur = con.cursor()
+            cur.execute("SELECT * FROM pwdhash")
             
-            for i in Userlogin['cursor'].fetchall():
-                if i == (userName,masterKey):
-                    Userlogin['type']='NORMAL'
-                    Userlogin['password']=Passwd
-                    Userlogin['userName']=userName
-                    Userlogin['hostid']=hostid
-                    Userlogin['masterKey']=masterKeyHashed
-                    normalLogin(Userlogin)
+            for i in cur.fetchall():
+                if i == (username, masterKey):
+                    normalMenu(cur, username, masterKey)
                     break
                 else:
                     print('No such User exists in database! Check if account exists!')
-            Userlogin['connection'].close()
-            del Userlogin
+            con.close()
 
-        if ch=='2':  # Logins the User as an Admin (Shd Have GRANT, REVOKE, CREATE, CREATE USER and DROP privileges on all tables) and hands over control to adminLogin().
-            hostid=input('Enter hostid:')
-            userName=input('Enter Username:')
-            Passwd=input('Enter MySQL Password:')
-            masterKey=input('Enter Master Password:')
+        elif ch == '2':  
+            # Logs in as an Admin and hands over control to adminMenu()
+            # (Requires GRANT, REVOKE, CREATE, CREATE USER and DROP privileges on all tables) 
+            hostid = input('Enter hostid: ')
+            username = input('Enter username: ')
+            passwd = getpass('Enter MySQL Password: ')
+            masterKey = getpass('Enter Master Password: ')
             masterKeyHashed = hashlib.sha256(masterKey.encode()).hexdigest()
 
-            Userlogin={}
-            Userlogin['connection'] = login(host_id=hostid,username=userName,password=Passwd,DB_Name='pwdmng')
-            Userlogin['cursor'] = Userlogin['connection'].cursor()
-            Userlogin['cursor'].execute("SELECT * FROM pwdhash")
+            con = login(hostid, username, passwd, 'pwdmng')
+            cur = con.cursor()
+            cur.execute("SELECT * FROM pwdhash")
             
-            for i in Userlogin['cursor'].fetchall():
-                if i[0:2] == (userName,masterKeyHashed):
-                    Userlogin['type']='ADMIN'
-                    Userlogin['password']=Passwd
-                    Userlogin['userName']=userName
-                    Userlogin['hostid']=hostid
-                    Userlogin['masterKey']=masterKey
-                    adminLogin(Userlogin)
+            for i in cur.fetchall():
+                if i[0:2] == (username, masterKeyHashed):
+                    adminMenu(cur, masterKey)
                     break
                 else:
                     print('No such User exists in database! Check if account exists!')
-            Userlogin['connection'].close()
-            del Userlogin
-        
-        if ch=='1':
+            con.close()
+
+        elif ch=='1':
             setup()
         
         else:
             print('Invalid choice!!!')
+        print()
+
 main()
