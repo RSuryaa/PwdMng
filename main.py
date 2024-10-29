@@ -1,11 +1,10 @@
-from  mysql.connector import connect 
+from  mysql.connector import connect, errors
 from prettytable import PrettyTable
 from getpass import getpass
 from cryptography.fernet import Fernet
-import time, hashlib
-import base64
+import time, hashlib, base64
 
-def createUser(cur,username,passwd,host,newUserExist,masterKey):
+def createUser(cur,username,passwd,host,newUserExist,masterKey,type):
     if not newUserExist:
         create_user = f"CREATE USER '{username}'@'{host}' IDENTIFIED BY '{passwd}'"
         cur.execute(create_user)
@@ -13,12 +12,12 @@ def createUser(cur,username,passwd,host,newUserExist,masterKey):
         try:
             testConnection = login(host,username,passwd)
             testConnection.close()
-        except:
+        except errors.ProgrammingError:
             print(f'Invalid MySQL credentials for {username}.')
             return None
     masterKey=hashlib.sha256(masterKey.encode()).hexdigest()
     try:
-        cur.execute("INSERT INTO pwdhash VALUES(%s,%s,'NORMAL')", [username, masterKey])
+        cur.execute("INSERT INTO pwdhash VALUES('{}','{}','{}')".format(username, masterKey, type))
     except:
         print('Error registering user! Check if user already registered in database')
     else:
@@ -58,6 +57,8 @@ def setup():
     cur.execute('USE PwdMng')
     cur.execute('CREATE TABLE IF NOT EXISTS pwdhash(username varchar(20), pwdhashed varchar(64), type varchar(6))')
 
+
+
     masterKey = getMasterKey()
 
     cur.execute("INSERT INTO pwdhash VALUES('root', %s,'ADMIN')", [masterKey])
@@ -71,12 +72,65 @@ def login(host_id, username, password, db=None):
     else:
         return connect(host=host_id,user=username,passwd=password,database=db)
 
-def normalMenu(cur, username, masterKey, passwd):
-    raise NotImplementedError
+def normalMenu(con, cur, username, masterKey, passwd):
+    # Options for normal user
+    key=hashpwdmixer(masterKey,passwd)
+    while True:
+        print('Logged in as Normal User')
+        print('='*30)
+        print('Options:\n')
+        print('1. Enter New Password')
+        print('2. List your Passwords')
+        print('3. Search your Password')
+        print('4. Delete your Password')
+        print('5. Logout')
+        print('='*30)
+        ch = input('Enter your choice: ')
 
-def adminMenu(cur, username, masterKey, passwd):  
+        if ch == '1':
+            website = input('Website: ')
+            webpwd = input('Password to store: ')
+            webpwd = encrypt(webpwd,key)
+            insertpwd(cur, website, webpwd, username)
+            print('Password saved successfully...')
+            con.commit()
+        
+        elif ch == '2':
+            pwdlist = retrievepwd(cur, username, key)
+            table = PrettyTable()
+            table.field_names = ['PID', 'Website', 'Password', 'LastUpdated']
+            table.add_rows(pwdlist)
+
+            print(table)
+
+        elif ch == '3':
+            value = input('Enter the name of website to search for:')
+            pwdlist = searchpwd(cur, username, key, value)
+            table = PrettyTable()
+            table.field_names = ['PID', 'Website', 'Password', 'LastUpdated']
+            table.add_rows(pwdlist)
+
+            print(table)
+        
+        elif ch == '4':
+            website = ('Enter website to delete its entry:')
+            del_command = "DELETE FROM {} WHERE website = '{}'".format(username, website)
+            cur.execute(del_command)
+            print('Entry deleted successfully!')
+            con.commit()
+        
+        else:
+            return None
+
+def adminMenu(con, cur, username, masterKey, passwd):  
     # Options for admin
     key=hashpwdmixer(masterKey,passwd)
+
+    cur.execute("SELECT type FROM pwdhash WHERE username = '{}'".format(username))
+    if cur.fetchone()[0] != 'ADMIN':
+        print(username, 'is not ADMIN! Exiting ADMIN Login process...')
+        return None
+
     while True:
         print('Logged in as Admin')
         print('='*30)
@@ -103,11 +157,13 @@ def adminMenu(cur, username, masterKey, passwd):
                     userExists = True
                     break
 
-            pwd = input("User's MySQL password: ")
+            pwd = getpass("User's MySQL password: ")
             host = input("User's host: ")
             newMasterKey = getMasterKey("User's Master Key: ")
+            utype = input('User type (ADMIN / NORMAL):').upper()
 
-            createUser(cur, uname, pwd, host, userExists, newMasterKey)
+            createUser(cur, uname, pwd, host, userExists, newMasterKey, utype)
+            con.commit()
 
         elif ch == '2':
             target = input('Username to be deleted: ')
@@ -115,6 +171,7 @@ def adminMenu(cur, username, masterKey, passwd):
             cur.execute(del_table)
             cur.execute("DELETE FROM pwdhash WHERE username = %s", [target])
             print('User deleted successfully')
+            con.commit()
 
         elif ch == '3':
             print('List of users registered in database:')
@@ -124,10 +181,12 @@ def adminMenu(cur, username, masterKey, passwd):
             while True:
                 command = input("Enter SQL Command to grant/revoke privilege: ")
                 if command == None:
+                    con.commit()
                     break
                 cur.execute(command)
                 quit = input('Do you want to execute another command? (Y/N): ')
                 if quit not in 'yY':
+                    con.commit
                     break
 
         elif ch == '4':
@@ -136,6 +195,7 @@ def adminMenu(cur, username, masterKey, passwd):
             webpwd = encrypt(webpwd,key)
             insertpwd(cur, website, webpwd, username)
             print('Password saved successfully...')
+            con.commit()
         
         elif ch == '5':
             pwdlist = retrievepwd(cur,username, key)
@@ -144,6 +204,22 @@ def adminMenu(cur, username, masterKey, passwd):
             table.add_rows(pwdlist)
 
             print(table)
+
+        elif ch == '6':
+            value = input('Enter the name of website to search for:')
+            pwdlist = searchpwd(cur, username, key, value)
+            table = PrettyTable()
+            table.field_names = ['PID', 'Website', 'Password', 'LastUpdated']
+            table.add_rows(pwdlist)
+
+            print(table)
+        
+        elif ch == '7':
+            website = input('Enter website to delete its entry:')
+            del_command = "DELETE FROM {} WHERE website = '{}'".format(username, website)
+            cur.execute(del_command)
+            print('Entry deleted successfully!')
+            con.commit()
         
         else:
             return None
@@ -178,6 +254,14 @@ def retrievepwd(cur, user, key):
         pwdlist.append(pwdtuple[i][0:2]+(decrypt(pwdtuple[i][2],key),)+ (pwdtuple[i][3],))
     return pwdlist
 
+def searchpwd(cur, user, key, value):
+    cur.execute("SELECT * FROM {} WHERE website LIKE '{}'".format(user, value))
+    pwdtuple = cur.fetchall()
+    pwdlist = []
+    for i in range(len(pwdtuple)):
+        pwdlist.append(pwdtuple[i][0:2]+(decrypt(pwdtuple[i][2],key),)+ (pwdtuple[i][3],))
+    return pwdlist
+
 def encrypt(pwd,key):
     key = bytes(key, 'utf-8')
     key = base64.b64encode(key)
@@ -192,9 +276,34 @@ def decrypt(encrpwd,key):
 
 def convertTime(timetuple):  
     # Converts time to valid format for entry into MYSQL database
-    return '{}{}{}{}{}{}'.format(timetuple.tm_year,timetuple.tm_mon,timetuple.tm_mday,timetuple.tm_hour,timetuple.tm_min,timetuple.tm_sec)
+    timenow = str(timetuple.tm_year)
 
-#insertpwd(b,input(),input())
+    if len(str(timetuple.tm_mon)) == 1:
+        timenow = timenow + '0' + str(timetuple.tm_mon)
+    else:
+        timenow = timenow + str(timetuple.tm_mon)
+
+    if len(str(timetuple.tm_mday)) == 1:
+        timenow = timenow + '0' + str(timetuple.tm_mday)
+    else:
+        timenow = timenow + str(timetuple.tm_mday)
+
+    if len(str(timetuple.tm_hour)) == 1:
+        timenow = timenow + '0' + str(timetuple.tm_hour)
+    else:
+        timenow = timenow + str(timetuple.tm_hour)
+
+    if len(str(timetuple.tm_min)) == 1:
+        timenow = timenow + '0'+ str(timetuple.tm_min)
+    else:
+        timenow = timenow + str(timetuple.tm_min)
+
+    if len(str(timetuple.tm_sec)) == 1:
+        timenow = timenow + '0' + str(timetuple.tm_sec)
+    else:
+        timenow = timenow + str(timetuple.tm_sec)
+
+    return timenow
 
 def main():
     while True:
@@ -217,13 +326,19 @@ def main():
             masterKey = getpass('Enter Master Password: ')
             masterKey = hashlib.sha256(masterKey.encode()).hexdigest()
 
-            con = login(hostid, username, passwd, 'pwdmng')
+            try:
+                con = login(hostid, username, passwd, 'pwdmng')
+            except errors.ProgrammingError:
+                print('Invalid login credentials! Try Again!')
+                continue
+
             cur = con.cursor()
             cur.execute("SELECT * FROM pwdhash")
             
             for i in cur.fetchall():
                 if i == (username, masterKey):
                     normalMenu(cur, username, masterKey, passwd)
+                    con.commit()
                     break
                 else:
                     print('No such User exists in database! Check if account exists!')
@@ -238,13 +353,19 @@ def main():
             masterKey = getpass('Enter Master Password: ')
             masterKey = hashlib.sha256(masterKey.encode()).hexdigest()
 
-            con = login(hostid, username, passwd, 'pwdmng')
+            try:
+                con = login(hostid, username, passwd, 'pwdmng')
+            except errors.ProgrammingError:
+                print('Invalid login credentials! Try Again!')
+                continue
+
             cur = con.cursor()
             cur.execute("SELECT * FROM pwdhash")
             
             for i in cur.fetchall():
                 if i[0:2] == (username, masterKey):
-                    adminMenu(cur, username, masterKey, passwd)
+                    adminMenu(con, cur, username, masterKey, passwd)
+                    con.commit()
                     break
                 else:
                     print('No such User exists in database! Check if account exists!')
